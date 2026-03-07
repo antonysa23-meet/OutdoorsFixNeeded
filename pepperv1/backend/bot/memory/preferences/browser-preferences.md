@@ -55,14 +55,16 @@ When packaging Pepper as a `.exe` (e.g. via pkg, electron, or a Windows installe
    was not started with any DevTools flags. Evaluate per Chrome version at packaging time.
 5. Store the chosen `User Data Directory` in `config.json` (already gitignored) so it's machine-local.
 
-## MCP Selection (Automatic)
+## MCP Selection (Browser-Dependent)
 
-Pepper uses `@playwright/mcp` with `--cdp-endpoint` pointing to the AutomationProfile Chrome instance.
+**Which MCP to use depends on the user's preferred browser (set at the top of this file).**
 
-| Browser | MCP Used | How it connects |
-|---------|----------|-----------------|
-| **Google Chrome** | `@playwright/mcp` via CDP on AutomationProfile | Requires Chrome running with `--remote-debugging-port=9222 --user-data-dir=AutomationProfile` |
-| **Edge / Brave / Other** | `@playwright/mcp` with `--cdp-endpoint` | Same approach — use a non-default user data dir if CDP is ignored |
+| Browser | MCP Used | Tools | How it connects |
+|---------|----------|-------|-----------------|
+| **Google Chrome** | `chrome-devtools-mcp` (`--autoConnect`) | `mcp__chrome__*` | Connects to already-running Chrome. No CDP port needed. All sessions/logins preserved automatically. |
+| **Edge / Brave / Other** | `@playwright/mcp` via CDP | `mcp__playwright__*` | Requires browser running with `--remote-debugging-port=9222 --user-data-dir=<separate dir>` |
+
+**Current machine**: Preferred browser = **Google Chrome** → use `mcp__chrome__*` tools.
 
 ## Chrome Profiles (this machine)
 | Directory | Email | Use for |
@@ -102,13 +104,23 @@ This is self-healing on any machine: update the three fields at the top of this 
 5. Pepper will auto-launch from then on via browser-health.js
 
 ## MCP Server Configuration (.mcp.json)
+
+Both servers are configured. The bot selects which tools to call based on the preferred browser above.
+
 ```json
 {
   "mcpServers": {
+    "chrome": {
+      "command": "npx",
+      "args": ["chrome-devtools-mcp@latest", "--autoConnect"]
+    },
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222"]
+      "args": ["@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222", "--no-isolated", "--timeout-navigation", "10000", "--timeout-action", "5000"]
     }
   }
 }
 ```
+
+- **Chrome users**: bot calls `mcp__chrome__*` tools (autoConnect — no port setup needed)
+- **Edge/Brave users**: bot calls `mcp__playwright__*` tools (requires CDP on port 9222)
