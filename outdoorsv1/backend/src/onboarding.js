@@ -149,11 +149,6 @@ function updateBrowserPreference(profileData) {
   const match = profileData.match(/\*\*Browser:\*\*\s*(.+)/i);
   if (!match) return;
 
-  if (!existsSync(BROWSER_PREFS_PATH)) {
-    console.log('[onboarding] browser-preferences.md not found, skipping browser sync');
-    return;
-  }
-
   // Normalize common short names to full names used in browser-preferences.md
   const BROWSER_NAMES = {
     'edge': 'Microsoft Edge',
@@ -166,6 +161,20 @@ function updateBrowserPreference(profileData) {
   const raw = match[1].trim();
   const normalized = BROWSER_NAMES[raw.toLowerCase()] || raw;
 
+  if (!existsSync(BROWSER_PREFS_PATH)) {
+    // Create minimal browser-preferences.md — browser-health.js auto-detects the executable
+    const minimal = [
+      '# Browser Preferences\n',
+      '## Browser Selection',
+      `- **Preferred Browser**: ${normalized}`,
+      '- **CDP Port**: 9222',
+    ].join('\n');
+    mkdirSync(dirname(BROWSER_PREFS_PATH), { recursive: true });
+    writeFileSync(BROWSER_PREFS_PATH, minimal, 'utf-8');
+    console.log(`[onboarding] Created browser-preferences.md with "${normalized}"`);
+    return;
+  }
+
   try {
     let prefs = readFileSync(BROWSER_PREFS_PATH, 'utf-8');
     const updated = prefs.replace(
@@ -174,7 +183,7 @@ function updateBrowserPreference(profileData) {
     );
     if (updated !== prefs) {
       writeFileSync(BROWSER_PREFS_PATH, updated, 'utf-8');
-      console.log(`[onboarding] Browser preference updated to "${normalized}" in browser-preferences.md`);
+      console.log(`[onboarding] Browser preference updated to "${normalized}"`);
     }
   } catch (err) {
     console.log(`[onboarding] Failed to update browser-preferences.md: ${err.message}`);

@@ -370,6 +370,11 @@ io.on('connection', async (socket) => {
       resumeSessionId = webSession.sessionId;
     }
 
+    const processKey = parsed.number !== null ? `web:conv:${parsed.number}` : `web:win:${windowKey}`;
+
+    // Create an isolated session for this execution (must be before image saving)
+    const session = createSession(processKey, 'web');
+
     // Save image to disk if present (session-scoped directory)
     let finalPrompt = parsed.body;
     if (imageBase64) {
@@ -387,14 +392,10 @@ io.on('connection', async (socket) => {
       }
     }
 
-    const processKey = parsed.number !== null ? `web:conv:${parsed.number}` : `web:win:${windowKey}`;
     const convoLog = { sender: 'web', prompt: finalPrompt, conversationNumber: parsed.number, resumeSessionId, timestamp: new Date().toISOString(), events: [] };
     const isKnownCode = parsed.number !== null && getConversationMode(parsed.number) === 'code';
     // Track current sessionId for progress events (starts with resume or client-provided)
     let currentSessionId = resumeSessionId || clientSessionId || null;
-
-    // Create an isolated session for this execution
-    const session = createSession(processKey, 'web');
     io.emit('session_created', { id: session.id, processKey, transport: 'web' });
     emitLog('incoming', { sender: 'web', processKey, prompt: finalPrompt, conversation: parsed.number });
 

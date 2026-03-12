@@ -17,7 +17,7 @@ import { execSync } from 'child_process';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
 
-const MAX_FEEDBACK_LOOPS = 3;
+const COMPLEXITY_MAX_LOOPS = { simple: 1, moderate: 2, complex: 3 };
 
 // Summarize fullEvents into a compact tool call history for the learner.
 // Keeps output bounded to ~4000 chars so the learner prompt stays reasonable.
@@ -85,7 +85,7 @@ function truncateOutput(output) {
 }
 
 const FAILURE_PATTERNS = [
-  /i (?:can'?t|cannot|am unable to|don'?t have (?:the ability|access)|am not able to)/i,
+  /i (?:can'?t|cannot|am unable to|don'?t have (?:the ability|access)|am not able to) (?:do|perform|complete|accomplish|execute|help with)/i,
   /(?:unfortunately|sorry),? (?:i |this )?(?:can'?t|cannot|isn'?t possible|is not possible|won'?t work)/i,
   /i don'?t (?:know how|have (?:enough|the (?:tools|knowledge|capability)))/i,
   /(?:beyond|outside) (?:my|the) (?:capabilities|scope|ability)/i,
@@ -101,6 +101,13 @@ const SUCCESS_PATTERNS = [
   /^(?:email|message) sent\.?$/i,
 ];
 
+const FALSE_POSITIVE_PATTERNS = [
+  /(?:can'?t|cannot|couldn'?t) find (?:any|the|unread|new|recent)/i,
+  /no (?:new |unread )?(?:emails|messages|tasks|assignments|notifications)/i,
+  /inbox is (?:empty|clean|clear)/i,
+  /nothing (?:new|due|pending|found)/i,
+];
+
 function detectFailure(response) {
   if (!response) return true;
   const trimmed = response.trim();
@@ -109,6 +116,8 @@ function detectFailure(response) {
   if (trimmed.length < 20 && SUCCESS_PATTERNS.some(p => p.test(trimmed))) return false;
   // Truly empty/meaningless responses are failures
   if (trimmed.length < 3) return true;
+  if (FALSE_POSITIVE_PATTERNS.some(p => p.test(response))) return false;
+  if (trimmed.length > 500) return false;
   return FAILURE_PATTERNS.some(p => p.test(response));
 }
 
@@ -187,13 +196,15 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
   const scoreStr = outputSpec.outputScores
     ? ' | scores: ' + Object.entries(outputSpec.outputScores).map(([k, v]) => `${k}=${v}`).join(' ')
     : '';
-  agg.phase('A', `Complete → [${activeLabels}]${scoreStr}`);
+  const intent = outputSpec.intent || 'query';
+  agg.phase('A', `Complete → intent=${intent} formats=[${activeLabels}]${scoreStr}`);
 
   // Dynamic max turns based on task complexity from Phase A
   const COMPLEXITY_TURNS = { simple: 15, moderate: 25, complex: 45 };
   const maxTurns = COMPLEXITY_TURNS[outputSpec.complexity] || 25;
 
-  // ── Feedback loop: A → B → C? → D, max 3 iterations ──
+  // ── Feedback loop: A → B → C? → D, complexity-aware iterations ──
+  const maxLoops = COMPLEXITY_MAX_LOOPS[outputSpec.complexity] || 2;
   let loopCount = 0;
   let lastDResponse = null;
   let lastDSessionId = null;
@@ -201,7 +212,7 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
   let previousFailure = null;
   const seenToolRequests = new Set(); // Track NEEDS_MORE_TOOLS to prevent duplicate requests
 
-  while (loopCount < MAX_FEEDBACK_LOOPS) {
+  while (loopCount < maxLoops) {
     loopCount++;
 
     // ── Phase B: Memory retrieval (local ML) + gap detection (Haiku on failure) ──
@@ -211,7 +222,8 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
     const inventory = getFullInventory();
     const phaseBResponse = await runPhaseB(
       previousFailure ? `${prompt}\n\nPrevious failure context: ${previousFailure.slice(0, 500)}` : prompt,
-      inventory
+      inventory,
+      intent
     );
     const audit = parseAuditResult(phaseBResponse);
     const selectedSummary = (audit.selectedMemories || [])
@@ -227,6 +239,7 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
         systemPrompt: modelBGapPrompt(taskDesc, inventory, prompt, previousFailure),
         model: 'haiku',
         claudeArgs: ['--print', '--max-turns', '1'],
+        allowBrowser: false,
         onProgress: (type, data) => agg.forward('B', type, data),
         processKey: processKey ? `${processKey}:Bgap` : null,
         timeout,
@@ -259,6 +272,7 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
         systemPrompt: modelCPrompt(audit.missingMemories, inventory),
         model: 'sonnet',
         claudeArgs: ['--print', '--allowedTools', 'WebSearch,WebFetch,Bash'],
+        allowBrowser: false,
         onProgress: (type, data) => agg.forward('C', type, data),
         processKey: processKey ? `${processKey}:C` : null,
         timeout,
@@ -289,7 +303,8 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
     const newContents = newlyCreatedMemories.map(m => ({ name: m.name, category: m.category, content: m.content }));
 
     // Add site context detected from the prompt
-    const siteContext = detectSiteContext(prompt);
+    const selectedNames = new Set((audit.selectedMemories || []).map(m => m.name));
+    const siteContext = detectSiteContext(prompt).filter(s => !selectedNames.has(s.name));
     const allMemoryContents = [...selectedContents, ...newContents, ...siteContext];
 
     // If the task involves browser skills, launch the correct Chrome (AutomationProfile)
@@ -297,12 +312,16 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
     const needsBrowser = allMemoryContents.some(m =>
       m.category === 'skill' && (m.name === 'browser_use' || m.name === 'chrome_use')
     ) || /\b(browser|navigate|gmail|website|chrome|web|email|linkedin|url|http)\b/i.test(prompt);
+    // Resolve browser toolset at prompt-build time so D doesn't waste turns checking preferences
+    const browserPrefs = allMemoryContents.find(m => m.name === 'browser-preferences');
+    const browserToolset = browserPrefs?.content?.includes('Google Chrome') ? 'chrome' : 'playwright';
+
     if (needsBrowser) {
       await ensureBrowserReady();
     }
     const phaseD = await runModel({
       userPrompt: prompt,
-      systemPrompt: modelDPrompt(prompt, outputSpec, allMemoryContents, { shortTermDir, needsBrowser }),
+      systemPrompt: modelDPrompt(prompt, outputSpec, allMemoryContents, { shortTermDir, needsBrowser, browserToolset }),
       model: 'sonnet',
       claudeArgs: config.claudeArgs,
       onProgress: (type, data) => agg.forward('D', type, data),
@@ -334,7 +353,7 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
 
     // Check if Model D needs more tools/knowledge or failed entirely
     const needsMore = lastDResponse?.match(/\[NEEDS_MORE_TOOLS:\s*(.+?)\]/);
-    if (needsMore && loopCount < MAX_FEEDBACK_LOOPS) {
+    if (needsMore && loopCount < maxLoops) {
       const toolsNeeded = needsMore[1].trim();
       // Prevent the same tool request from looping — if we already tried this, give up
       if (seenToolRequests.has(toolsNeeded.toLowerCase())) {
@@ -347,14 +366,14 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
       audit.missingMemories = [buildToolMemoryRequest(toolsNeeded)];
       previousFailure = lastDResponse;
       // Skip directly to C by re-entering the loop at the right point
-      loopCount++;
-      if (loopCount <= MAX_FEEDBACK_LOOPS) {
+      if (loopCount < maxLoops) {
         agg.phase('C', `Creating 1 new memory file(s) for: ${toolsNeeded}`);
         const phaseC2 = await runModel({
           userPrompt: `Create the following memories:\n- ${audit.missingMemories[0].name}: ${audit.missingMemories[0].description}`,
           systemPrompt: modelCPrompt(audit.missingMemories, getFullInventory()),
           model: 'sonnet',
           claudeArgs: ['--print', '--allowedTools', 'WebSearch,WebFetch,Bash'],
+          allowBrowser: false,
           onProgress: (type, data) => agg.forward('C', type, data),
           processKey: processKey ? `${processKey}:C2` : null,
           timeout,
@@ -370,11 +389,13 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
             onProgress?.('warning', { message: `Failed to write memory ${mem.name}: ${err.message}` });
           }
         }
-        // Re-run D with the new memory
-        const updatedContents = [...getContents(audit.selectedMemories || []), ...newlyCreatedMemories.map(m => ({ name: m.name, category: m.category, content: m.content })), ...detectSiteContext(prompt)];
+        // Re-run D with the new memory (deduplicate site context against Phase B selections)
+        const selectedNames2 = new Set((audit.selectedMemories || []).map(m => m.name));
+        const siteContext2 = detectSiteContext(prompt).filter(s => !selectedNames2.has(s.name));
+        const updatedContents = [...getContents(audit.selectedMemories || []), ...newlyCreatedMemories.map(m => ({ name: m.name, category: m.category, content: m.content })), ...siteContext2];
         const phaseD2 = await runModel({
           userPrompt: prompt,
-          systemPrompt: modelDPrompt(prompt, outputSpec, updatedContents, { shortTermDir, needsBrowser }),
+          systemPrompt: modelDPrompt(prompt, outputSpec, updatedContents, { shortTermDir, needsBrowser, browserToolset }),
           model: 'sonnet',
           claudeArgs: config.claudeArgs,
           onProgress: (type, data) => agg.forward('D', type, data),
@@ -395,7 +416,17 @@ export async function runPipeline(prompt, { onProgress, processKey, timeout, res
       break;
     }
 
-    if (detectFailure(lastDResponse) && loopCount < MAX_FEEDBACK_LOOPS) {
+    // Detect "ran out of turns" — D made many tool calls but returned empty/truncated.
+    // This is a turns issue, not a knowledge gap — looping B→C→D won't help.
+    const toolCallCount = (lastDFullEvents || []).filter(e =>
+      e.type === 'assistant' && e.message?.content?.some(b => b.type === 'tool_use')
+    ).length;
+
+    if (detectFailure(lastDResponse) && loopCount < maxLoops) {
+      if (toolCallCount > 5 && (!lastDResponse || lastDResponse.trim().length < 50)) {
+        agg.phase('feedback', `Model D ran out of turns after ${toolCallCount} tool calls. Task too complex for single pass.`);
+        break;
+      }
       agg.phase('feedback', `Model D couldn't complete the task. Looping back to B for more knowledge.`);
       previousFailure = lastDResponse || '(executor returned empty response)';
       continue;
@@ -505,23 +536,33 @@ function learnInBackground(prompt, outputSpec, executionResponse, fullEvents, on
         userPrompt: `Review this execution and save any useful knowledge.\n\nPrompt: ${prompt}\n\nResponse summary: ${(executionResponse || '').slice(0, 2000)}`,
         systemPrompt: learnerPrompt(prompt, outputSpec, (executionResponse || '').slice(0, 3000), toolCallSummary, inventory),
         model: 'sonnet',
+        allowBrowser: false,
         onProgress: (type, data) => agg.forward('learner', type, data),
         processKey: processKey ? `${processKey}:learner` : null,
         timeout: timeout || 900000,
       });
 
       const learnerResult = parseLearnerResult(result.response);
+      if (!learnerResult.updates || learnerResult.updates.length === 0) {
+        process.stderr.write(`[learner] No updates extracted from learner response (length=${(result.response || '').length})\n`);
+      }
       for (const update of learnerResult.updates) {
         try {
           if (update.path && update.action === 'append') {
+            if (update.path.includes('..') || update.path.startsWith('/') || /^[a-zA-Z]:/.test(update.path)) {
+              process.stderr.write(`[learner] Blocked path traversal: ${update.path}\n`);
+              continue;
+            }
             await updateMemory(update.path, 'append', update.content);
           } else {
             await writeMemory(update.name, update.category, update.content);
           }
-        } catch {}
+        } catch (err) {
+          process.stderr.write(`[learner] Failed to write memory ${update.name || update.path}: ${err.message}\n`);
+        }
       }
-    } catch {
-      // Non-fatal — learning is best-effort
+    } catch (err) {
+      process.stderr.write(`[learner] Learning failed: ${err.message}\n`);
     } finally {
       activeLearners--;
     }

@@ -17,6 +17,7 @@ class MLWorker {
     this.proc = null;
     this.stdoutBuffer = '';
     this.pendingQueue = [];
+    this.ready = false;
   }
 
   startProcess() {
@@ -47,7 +48,11 @@ class MLWorker {
     });
 
     this.proc.stderr.on('data', chunk => {
-      process.stderr.write(`[ml-runner] ${chunk}`);
+      const msg = chunk.toString();
+      process.stderr.write(`[ml-runner] ${msg}`);
+      if (msg.includes('Ready')) {
+        this.ready = true;
+      }
     });
 
     this.proc.on('close', code => {
@@ -139,16 +144,21 @@ export async function runPhaseA(prompt) {
     const result = await getWorker().call({ task: 'phase_a', prompt });
     return JSON.stringify(result);
   } catch (err) {
-    process.stderr.write(`[ml-runner] Phase A error: ${err.message}\n`);
+    process.stderr.write(`[ml-runner] Phase A FALLBACK triggered (ML subprocess failed): ${err.message}\n`);
+    process.stderr.write(`[ml-runner] Prompt that caused fallback: "${(prompt || '').slice(0, 100)}"\n`);
     // Return a safe fallback that parseOutputSpec can handle
     return JSON.stringify({
       taskDescription: (prompt || '').slice(0, 500),
+      intent: 'query',
+      intentScores: {},
       outputType: 'text',
-      outputLabels: { text: true, picture: false, command: false, presentation: false, specificFile: false, other: false },
+      outputLabels: { inline: true, file: false, image: false, slides: false, browser: false },
+      outputScores: {},
       outputFormat: { type: 'inline_text', structure: 'direct answer', deliveryMethod: 'inline' },
       requiredDomains: [],
       complexity: 'simple',
       estimatedSteps: 1,
+      _fallback: true,
     });
   }
 }
@@ -158,9 +168,9 @@ export async function runPhaseA(prompt) {
  * inventory is the array from getFullInventory().
  * Returns a JSON string compatible with parseAuditResult().
  */
-export async function runPhaseB(prompt, inventory) {
+export async function runPhaseB(prompt, inventory, intent = 'query') {
   try {
-    const result = await getWorker().call({ task: 'phase_b', prompt, inventory });
+    const result = await getWorker().call({ task: 'phase_b', prompt, inventory, intent });
     return JSON.stringify(result);
   } catch (err) {
     process.stderr.write(`[ml-runner] Phase B error: ${err.message}\n`);

@@ -59,7 +59,11 @@ async function sendOnboardingWelcome(sock, groupJid) {
       `🌿 Browser (Chrome, Edge, Brave, Arc)\n` +
       `🌿 Outdoor vibe — beaches, mountains, forests, desert, or city? (sets your emoji aesthetic)`
     );
-    await sock.sendMessage(groupJid, { text: msg });
+    const sent = await sock.sendMessage(groupJid, { text: msg });
+    if (sent?.key?.id) {
+      botSentIds.add(sent.key.id);
+      storeMessage(sent.key.id, sent.message);
+    }
   } catch (err) {
     console.log('[WhatsApp] Failed to send onboarding welcome:', err.message);
     await sock.sendMessage(groupJid, { text: 'Outdoors is ready! Send a message here to get started.' }).catch(() => {});
@@ -93,6 +97,7 @@ let connectionStatus = 'disconnected';
 let lastQR = null;
 let reconnectAttempt = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
+const seenTimestampKeys = new Set();
 
 // Track message IDs sent by the bot to prevent infinite loops
 const botSentIds = new Set();
@@ -219,6 +224,8 @@ async function startWhatsApp() {
     if (connection === 'open') {
       connectionStatus = 'connected';
       reconnectAttempt = 0;
+      seenTimestampKeys.clear();
+      processingIds.clear();
       io?.emit('status', connectionStatus);
       emitLog('connected', { message: 'WhatsApp connected successfully' });
       console.log('WhatsApp connected!');
@@ -257,7 +264,7 @@ async function startWhatsApp() {
   });
 
   sock.ev.on('messages.upsert', (upsert) => {
-    if (upsert.type !== 'notify') return;
+    if (upsert.type !== 'notify') return;  // Only process real-time messages
     const messages = upsert.messages || [];
     for (const msg of messages) {
       const msgId = msg.key.id;
@@ -267,15 +274,36 @@ async function startWhatsApp() {
         continue;
       }
 
+      // JID+timestamp dedup: same message has same ts regardless of wrapper or ID
+      const ts = (msg.messageTimestamp?.low || msg.messageTimestamp || 0);
+      const tsKey = `${msg.key.remoteJid}:${ts}`;
+      if (seenTimestampKeys.has(tsKey)) {
+        console.log(`[wa:dedup-ts] Skipping duplicate ${msgId} (ts=${ts})`);
+        continue;
+      }
+      seenTimestampKeys.add(tsKey);
+
       if (processingIds.has(msgId)) {
         console.log(`[wa:dedup] Skipping already-processing message ${msgId}`);
         continue;
       }
       processingIds.add(msgId);
 
+      // Skip system/protocol messages (group created, participant added, etc.)
+      // These legitimately have no .message body — they use messageStubType instead.
+      if (msg.messageStubType) {
+        continue;
+      }
+
       // Skip status updates / delivery receipts with no message content
       if (!msg.message) {
         console.log(`[wa:skip] No message content for ${msgId} from ${msg.key.remoteJid} (likely decryption failure)`);
+        emitLog('decryption_failure', { jid: msg.key.remoteJid, msgId });
+        // Notify the user so they know to resend (fire-and-forget since we're in a sync loop)
+        const failJid = msg.key.remoteJid;
+        if (failJid && failJid !== 'status@broadcast') {
+          sock.sendMessage(failJid, { text: '\u26a0\ufe0f Couldn\'t read that message (decryption issue). Please send it again.' }).catch(() => {});
+        }
         continue;
       }
 
@@ -285,6 +313,7 @@ async function startWhatsApp() {
       // Only process messages from the Outdoors group — ignore all DMs and other groups
       const remoteJid = msg.key.remoteJid;
       if (!config.outdoorsGroupJid || remoteJid !== config.outdoorsGroupJid) {
+        console.log(`[wa:skip] Message from ${remoteJid} not in Outdoors group (${config.outdoorsGroupJid || 'not set'})`);
         continue;
       }
 
@@ -341,8 +370,12 @@ async function startWhatsApp() {
         }, 3000);
 
         try {
-          await sock.sendMessage(jid, { react: { key: msg.key, text: '🌱' } });
-          console.log('[react] 🌱 sent');
+          try {
+            await sock.sendMessage(jid, { react: { key: msg.key, text: '🌱' } });
+            console.log('[react] 🌱 sent');
+          } catch (reactErr) {
+            console.log(`[react] Initial 🌱 failed (non-fatal): ${reactErr.message}`);
+          }
 
           // --- Onboarding check ---
           if (isOnboardingNeeded()) {
@@ -415,7 +448,7 @@ async function startWhatsApp() {
           sock.sendMessage(jid, { react: { key: msg.key, text: '' } })
             .then(() => console.log('[react] removed ⏳'))
             .catch(e => console.log('[react] remove failed:', e.message));
-          setTimeout(() => processingIds.delete(msgId), 60_000);
+          processingIds.delete(msgId);
         }
 
         if (!result) {

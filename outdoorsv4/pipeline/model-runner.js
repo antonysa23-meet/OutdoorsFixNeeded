@@ -10,8 +10,10 @@ import { register, unregister, emitActivity } from '../util/process-registry.js'
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-// .mcp.json lives at project root — two levels up from outdoorsv4/pipeline/
-const MCP_CONFIG_PATH = join(__dirname, '..', '..', '.mcp.json');
+// mcp-bot.json lives in outdoorsv4/ — minimal MCP config for bot subprocesses
+// (only chrome + playwright). The full .mcp.json has all MCPs for interactive use.
+const MCP_CONFIG_PATH = join(__dirname, '..', 'mcp-bot.json');
+const EMPTY_MCP_PATH = join(__dirname, '..', 'empty-mcp.json');
 
 const MODEL_MAP = {
   opus: 'claude-opus-4-20250514',
@@ -70,15 +72,18 @@ export function runModel({
       args.push('--max-turns', String(maxTurns || 25));
     }
 
-    // Inject MCP config so Claude always has browser tools, regardless of cwd
-    // Skip MCP for lightweight calls (e.g. onboarding) that don't need browser tools
-    if (!skipMcp && existsSync(MCP_CONFIG_PATH)) {
-      args.push('--mcp-config', MCP_CONFIG_PATH);
+    // MCP config: use --strict-mcp-config to prevent global MCPs (~100K tokens of
+    // tool schemas from notion, google_workspace, context7, etc.) from bloating context.
+    // Only load browser MCP servers (chrome + playwright) when the task needs them.
+    if (!skipMcp && allowBrowser && existsSync(MCP_CONFIG_PATH)) {
+      args.push('--mcp-config', MCP_CONFIG_PATH, '--strict-mcp-config');
+    } else {
+      // No MCP needed — pass an empty config file to block all global MCPs
+      args.push('--mcp-config', EMPTY_MCP_PATH, '--strict-mcp-config');
     }
 
     // Explicitly allow tools — MCP tools aren't fully covered by
     // --dangerously-skip-permissions in --print mode.
-    // When allowBrowser is false, skip browser MCP tools to save ~2000 tokens of tool schemas.
     const BASE_TOOLS = 'Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch';
     const BROWSER_TOOLS =
         'mcp__playwright__browser_navigate,mcp__playwright__browser_snapshot,' +
@@ -96,13 +101,16 @@ export function runModel({
         'mcp__chrome__click,mcp__chrome__type_text,mcp__chrome__fill,' +
         'mcp__chrome__press_key,mcp__chrome__list_pages,mcp__chrome__select_page,' +
         'mcp__chrome__evaluate_script,mcp__chrome__take_screenshot';
-    args.push('--allowedTools', allowBrowser ? `${BASE_TOOLS},${BROWSER_TOOLS}` : BASE_TOOLS);
+    if (!args.includes('--allowedTools')) {
+      args.push('--allowedTools', allowBrowser ? `${BASE_TOOLS},${BROWSER_TOOLS}` : BASE_TOOLS);
+    }
 
-    // Hard-block tools that waste turns
+    // Hard-block built-in tools that waste turns
     args.push('--disallowedTools',
-      'ToolSearch,TodoWrite,TodoRead,TaskCreate,TaskStop,' +
+      'ToolSearch,TodoWrite,TodoRead,TaskCreate,TaskStop,TaskGet,TaskList,TaskOutput,TaskUpdate,' +
       'CronCreate,CronDelete,CronList,EnterPlanMode,ExitPlanMode,' +
-      'EnterWorktree,ExitWorktree,NotebookEdit,Skill'
+      'EnterWorktree,ExitWorktree,NotebookEdit,Skill,Agent,' +
+      'ListMcpResourcesTool,ReadMcpResourceTool'
     );
 
     // For large system prompts, prepend instructions into the user prompt via stdin

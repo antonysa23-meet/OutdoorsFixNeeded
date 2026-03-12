@@ -3,8 +3,39 @@
 
 import { config } from '../../config.js';
 
+const INTENT_DESCRIPTIONS = {
+  query: 'The user is asking a **question** — retrieve information and answer it.',
+  action: 'The user wants you to **DO something** — take action, not explain.',
+  create: 'The user wants you to **create/produce** something — a file, document, or artifact.',
+  converse: 'The user is making **casual conversation** — respond naturally and briefly.',
+  instruct: 'The user is giving you a **standing instruction** — acknowledge and remember it.',
+};
+
+function _renderClassification(spec) {
+  const lines = [];
+  const intent = spec.intent || 'query';
+  lines.push(`**Intent**: \`${intent}\` — ${INTENT_DESCRIPTIONS[intent] || 'Execute the task.'}`);
+  const activeFormats = spec.outputLabels
+    ? Object.entries(spec.outputLabels).filter(([, v]) => v).map(([k]) => k)
+    : [];
+  if (activeFormats.length > 0) {
+    lines.push(`**Output formats**: ${activeFormats.join(', ')}`);
+  }
+  if (spec.complexity) {
+    lines.push(`**Complexity**: ${spec.complexity} (~${spec.estimatedSteps || 1} steps)`);
+  }
+  if (spec.requiredDomains && spec.requiredDomains.length > 0) {
+    lines.push(`**Domains**: ${spec.requiredDomains.join(', ')}`);
+  }
+  if (spec.outputFormat) {
+    lines.push(`**Delivery**: ${spec.outputFormat.deliveryMethod || 'inline'} (${spec.outputFormat.type || 'inline_text'})`);
+  }
+  return lines.join('\n');
+}
+
 // Browser-specific rules (~3000 tokens) — only injected when the task needs browser automation.
-const BROWSER_RULES = `## CRITICAL: Browser = User's Logged-In Session
+function getBrowserRules(browserToolset) {
+  return `## CRITICAL: Browser = User's Logged-In Session
 The browser MCP connects to the user's **already-running browser** with all sessions, cookies, and logins intact. This means:
 - **All the user's cookies, logins, and active sessions are available.** The user is already logged into Gmail, Canvas, Notion, LinkedIn, etc.
 - **You do NOT need to authenticate.** Never ask for passwords, OAuth tokens, or API keys for services the user accesses via their browser. Just navigate there — you're already logged in.
@@ -12,13 +43,13 @@ The browser MCP connects to the user's **already-running browser** with all sess
 - If a service has no public API or MCP server, **use the browser directly** — don't ask the user to set up an API or provide credentials. The browser session IS your credential.
 
 ## CRITICAL: Which Browser MCP Tools to Use
-Check \`bot/memory/preferences/browser-preferences.md\` for the **Preferred Browser**:
-- **Google Chrome** → use \`mcp__chrome__*\` tools (chrome-devtools-mcp via \`--browserUrl http://127.0.0.1:9222\`)
-  - Navigate: \`mcp__chrome__navigate_page\` | Evaluate JS: \`mcp__chrome__evaluate_script\` | Click: \`mcp__chrome__click\` | Type: \`mcp__chrome__type_text\` | Snapshot: \`mcp__chrome__take_snapshot\` | Screenshot: \`mcp__chrome__take_screenshot\` | Tabs: \`mcp__chrome__list_pages\`, \`mcp__chrome__select_page\`
-- **Edge / Brave / Other** → use \`mcp__playwright__*\` tools (CDP on port 9222)
+${browserToolset === 'playwright' ? `Use \`mcp__playwright__*\` tools (CDP on port 9222):
   - Navigate: \`mcp__playwright__browser_navigate\` | Evaluate JS: \`mcp__playwright__browser_evaluate\` | Click: \`mcp__playwright__browser_click\` | Type: \`mcp__playwright__browser_type\` | Snapshot: \`mcp__playwright__browser_snapshot\` | Tabs: \`mcp__playwright__browser_tabs\`
+  - Fallback: if \`mcp__playwright__*\` fails twice, try \`mcp__chrome__*\` once.` : `Use \`mcp__chrome__*\` tools (chrome-devtools-mcp via \`--browserUrl http://127.0.0.1:9222\`):
+  - Navigate: \`mcp__chrome__navigate_page\` | Evaluate JS: \`mcp__chrome__evaluate_script\` | Click: \`mcp__chrome__click\` | Type: \`mcp__chrome__type_text\` | Snapshot: \`mcp__chrome__take_snapshot\` | Screenshot: \`mcp__chrome__take_screenshot\` | Tabs: \`mcp__chrome__list_pages\`, \`mcp__chrome__select_page\`
+  - Fallback: if \`mcp__chrome__*\` fails twice, try \`mcp__playwright__*\` once.`}
 
-**If \`mcp__chrome__*\` fails to connect:** try \`mcp__playwright__*\` once as fallback (both use the same CDP port). If that also fails, output \`[NEEDS_MORE_TOOLS: Chrome CDP not available on port 9222]\` as the LAST line and stop. **Do NOT run any Bash/PowerShell command to start a browser.**
+If both fail, output \`[NEEDS_MORE_TOOLS: Chrome CDP not available on port 9222]\` as the LAST line and stop. **Do NOT run any Bash/PowerShell command to start a browser.**
 
 ## Service Access — Priority Ladder with Failover
 Each service has a priority ladder. Start at the top. If a method fails **twice with the same error**, SKIP IT and move to the next method. Do NOT retry the same method a third time.
@@ -31,8 +62,9 @@ Each service has a priority ladder. Start at the top. If a method fails **twice 
 | 4 | **Escalate** | All above methods exhausted | Never skip this — this is the safety net |
 
 **NEVER ask the user for API keys, tokens, or OAuth setup.** The user is away from their computer. Use whatever auth is already available (browser cookies, tokens in memory files, MCP configs).`;
+}
 
-export function buildPrompt(prompt, outputSpec, memoryContents, { shortTermDir, needsBrowser } = {}) {
+export function buildPrompt(prompt, outputSpec, memoryContents, { shortTermDir, needsBrowser, browserToolset } = {}) {
   const skills = memoryContents.filter(m => m.category === 'skill');
   const knowledge = memoryContents.filter(m => m.category !== 'skill');
 
@@ -58,8 +90,8 @@ The user is NOT at their laptop. They are sending messages remotely (phone, etc)
 - You ruthlessly work to solve the problem but if you get stuck take a step back, review the users message and consider what you may be missing. Being ruthless means trying 1 million different ways to solve it, being stupid means repeatedly trying the same thing.
 - review your work before submitting to the user, ask does, this make sense, am I proud of what I did, is this the best possible output I can produce, did I follow all the instructions, did I follow the skills, did I use the knowledge, is this professional quality, is this thorough, did I do everything I can to solve the problem with the tools available to me.
 
-## Output Specification
-${JSON.stringify(outputSpec, null, 2)}
+## Task Classification
+${_renderClassification(outputSpec)}
 
 **IMPORTANT**: The output spec describes the *format* of your response, NOT whether to act or explain.
 If the user's request contains action verbs (send, open, do, make, create, navigate, click, etc.) — **DO IT**.
@@ -83,7 +115,7 @@ When your task produces files (code, reports, images, data, etc.), write them to
 - Create a descriptive subfolder per task, e.g. 'outputs/pdf-report-2024/', 'outputs/scrape-results/'
 - Always tell the user the full path of what you wrote
 
-${needsBrowser ? BROWSER_RULES : ''}
+${needsBrowser ? getBrowserRules(browserToolset) : ''}
 
 ## Instructions
 1. Follow the output specification precisely — produce the exact output type and format described
@@ -93,8 +125,16 @@ ${needsBrowser ? BROWSER_RULES : ''}
 5. For files, write them to the outputs folder and provide the full path in your response
 6. For inline text, respond directly
 7. Be thorough and produce professional-quality output
-8. **Snapshots**: Save to '${shortTermDir || config.outputDirectory}/', never inline. These are YOUR working files — not user deliverables. For Chrome: \`mcp__chrome__take_snapshot\`. For Edge/Other: \`mcp__playwright__browser_snapshot\` with \`filename\` param. Grep the saved file for the refs you need.
+8. **Snapshots**: Call the snapshot tool and parse the result INLINE — the accessibility tree is returned in the tool result. NEVER save a snapshot to a file then Grep/Read it back (wastes 2-3 tool calls). If a snapshot is auto-truncated, use evaluate_script to extract just the data you need.
 9. **Do NOT call ToolSearch** — it does not exist. Browser MCP tools are pre-approved. Call them directly (check preference file for which set to use).
+
+## EFFICIENCY — Every turn costs time. Minimize turns.
+- **Batch independent tool calls in one turn.** If you need to read 5 files, call Read 5 times in ONE message — not 5 separate turns. Same for Write, Bash, or any mix of independent tools.
+- **Use shell commands for file operations.** To copy files/directories: \`cp\` or \`cp -r\`. To move: \`mv\`. To create trees: \`mkdir -p\`. Do NOT Read a file then Write it to a new path — that wastes two turns when \`cp\` does it in one.
+- **Do NOT over-verify.** The Write tool confirms success. Do NOT re-read files you just wrote, re-list directories you just created, or run verification commands after every step. One final check at the end is enough.
+- **Chain dependent shell commands** with \`&&\` in a single Bash call instead of separate turns.
+- **Batch browser form fills.** If you have refs for To, Subject, and Body from one snapshot, call all three fill/type calls in ONE turn. Only re-snapshot AFTER all fills if the page state changed.
+- **One snapshot per action cycle.** snapshot → batch all actions using those refs → snapshot only if refs are stale.
 
 ## Serving Static Files
 To preview HTML files locally, use: \`npx -y serve -s -l PORT <directory>\`
