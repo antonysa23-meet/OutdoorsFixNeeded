@@ -382,6 +382,17 @@ function setupIPC() {
         } catch { failed++; }
       }
 
+      // Strip account_info from copied Preferences so check-browser-auth
+      // doesn't think the user is already signed in (it came from the source profile)
+      const copiedPrefsPath = path.join(destDir, 'Preferences');
+      try {
+        if (fs.existsSync(copiedPrefsPath)) {
+          const prefs = JSON.parse(fs.readFileSync(copiedPrefsPath, 'utf-8'));
+          delete prefs.account_info;
+          fs.writeFileSync(copiedPrefsPath, JSON.stringify(prefs, null, 2));
+        }
+      } catch {}
+
       // Read all profiles for the preferences file
       const localStatePath = path.join(userDataDir, 'Local State');
       let allProfiles = [];
