@@ -5,8 +5,7 @@
 
 const isElectron = !!(window.electronAPI);
 let currentPage = 0;
-const totalPages = 5;
-let socket = null;
+const totalPages = 6;
 
 // ---------------------------------------------------------------------------
 // Page navigation
@@ -32,7 +31,8 @@ function goToPage(index) {
   // Trigger page-specific logic
   if (currentPage === 1) runInstallPage();
   if (currentPage === 2) runAuthPage();
-  if (currentPage === 3) runQRPage();
+  if (currentPage === 3) runBrowserPage();
+  if (currentPage === 4) runTelegramPage();
 }
 
 function nextPage() {
@@ -47,7 +47,7 @@ document.getElementById('btn-begin').addEventListener('click', () => {
   if (isElectron) {
     nextPage(); // Go to install page
   } else {
-    // Non-Electron: skip install + auth pages, go straight to QR
+    // Non-Electron: skip install + auth pages, go straight to browser setup
     goToPage(3);
   }
 });
@@ -95,7 +95,7 @@ async function runInstallPage() {
 
   if (!nodeDeps.ok) {
     setInstallStatus('Node dependency install failed. Please check your internet connection and restart.');
-    return; // BLOCK — do not advance if npm install failed
+    return;
   }
 
   // Step 2: Claude CLI
@@ -115,10 +115,9 @@ async function runInstallPage() {
     }
   }
 
-  // Step 3: Python ML deps (non-blocking — just mark done for now)
+  // Step 3: Python ML deps (non-blocking)
   setInstallItemState('install-python', 'active');
   setInstallStatus('Checking Python packages...');
-  // Python deps are optional — just mark as done
   setInstallItemState('install-python', 'done');
 
   setInstallStatus('All set!');
@@ -153,11 +152,9 @@ function showAuthState(id) {
   if (el) el.classList.remove('hidden');
 }
 
-// Auth button click
 document.getElementById('btn-auth')?.addEventListener('click', async () => {
   showAuthState('auth-waiting');
 
-  // Show progress while claude /login starts (~10s)
   const waitText = document.getElementById('auth-waiting-text');
   if (waitText) {
     waitText.textContent = 'Opening Claude login...';
@@ -171,14 +168,12 @@ document.getElementById('btn-auth')?.addEventListener('click', async () => {
     await delay(1000);
     nextPage();
   } else {
-    // Auth failed or timed out — let user retry
     showAuthState('auth-needed');
     const hint = document.querySelector('#auth-needed .auth-hint');
     if (hint) hint.textContent = 'Auth timed out — try again.';
   }
 });
 
-// Skip auth buttons — cancel polling to avoid wasting resources
 document.getElementById('btn-skip-auth')?.addEventListener('click', () => {
   if (isElectron) window.electronAPI.cancelAuthPoll?.();
   nextPage();
@@ -189,82 +184,191 @@ document.getElementById('btn-skip-auth-waiting')?.addEventListener('click', () =
 });
 
 // ---------------------------------------------------------------------------
-// Page 4: WhatsApp QR Code
+// Page 4: Browser Setup (multi-step: detect → profile select → copy → launch → sign-in)
 // ---------------------------------------------------------------------------
 
-async function runQRPage() {
-  if (isElectron) {
-    // Start backend first, then connect Socket.IO
-    const statusText = document.querySelector('#qr-loading .qr-status-text');
-    if (statusText) statusText.textContent = 'Starting backend...';
+let browserSetupDone = false;
+let detectedExePath = null;
+let authPollTimer = null;
 
-    const result = await window.electronAPI.startBackend();
-    if (!result.ok) {
-      if (statusText) statusText.textContent = 'Backend failed to start: ' + (result.error || 'unknown error');
+function showBrowserSection(id) {
+  const sections = ['browser-detect-btn', 'browser-detecting', 'browser-not-found', 'browser-profiles',
+    'browser-copying', 'browser-launching', 'browser-signin', 'browser-success', 'browser-error'];
+  sections.forEach(s => {
+    const el = document.getElementById(s);
+    if (el) el.classList.add('hidden');
+  });
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('hidden');
+}
+
+async function runBrowserPage() {
+  if (browserSetupDone) return;
+  // Page is ready — buttons are wired below
+}
+
+async function handleSetupChrome() {
+  if (!isElectron) return;
+
+  showBrowserSection('browser-detecting');
+
+  try {
+    const result = await window.electronAPI.detectBrowser();
+
+    if (!result.found) {
+      showBrowserSection('browser-not-found');
       return;
     }
-    const backendUrl = await window.electronAPI.getBackendUrl();
-    connectToBackend(backendUrl);
-  } else {
-    connectToBackend();
-  }
-}
 
-function connectToBackend(url, retryCount) {
-  retryCount = retryCount || 0;
+    detectedExePath = result.exePath;
 
-  const statusEl = document.getElementById('qr-status');
-
-  // Dynamic Socket.IO loading for Electron (no /socket.io/socket.io.js served)
-  if (typeof io === 'undefined') {
-    const script = document.createElement('script');
-    script.src = (url || '') + '/socket.io/socket.io.js';
-    script.onload = () => doConnect(url, statusEl);
-    script.onerror = () => {
-      // Remove the failed script tag so we can retry
-      script.remove();
-      if (retryCount < 5) {
-        if (statusEl) statusEl.textContent = 'Connecting to backend... (attempt ' + (retryCount + 2) + ')';
-        setTimeout(() => connectToBackend(url, retryCount + 1), 2000);
-      } else {
-        if (statusEl) statusEl.textContent = 'Cannot connect to backend. Please restart the app.';
-      }
-    };
-    document.head.appendChild(script);
-  } else {
-    doConnect(url, statusEl);
-  }
-}
-
-function doConnect(url, statusEl) {
-  socket = url ? io(url) : io();
-
-  socket.on('qr', (dataUrl) => {
-    document.getElementById('qr-loading').classList.add('hidden');
-    const display = document.getElementById('qr-display');
-    display.classList.remove('hidden');
-    document.getElementById('qr-image').src = dataUrl;
-    if (statusEl) statusEl.textContent = 'Scan this code with your phone';
-  });
-
-  socket.on('status', (status) => {
-    if (status === 'connected') {
-      if (statusEl) statusEl.textContent = '';
-      nextPage();
-    } else if (status === 'waiting_for_qr') {
-      if (statusEl) statusEl.textContent = 'QR code ready — scan with WhatsApp';
-    } else if (status === 'disconnected') {
-      if (statusEl) statusEl.textContent = 'Disconnected — waiting for reconnect...';
+    if (result.profiles.length <= 1) {
+      // Auto-select the only profile (or Default if none)
+      const selectedProfile = result.profiles.length === 1 ? result.profiles[0].directory : 'Default';
+      await createAndLaunch(selectedProfile);
+    } else {
+      // Show profile selector dropdown
+      const select = document.getElementById('profile-select');
+      select.innerHTML = '';
+      result.profiles.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.directory;
+        opt.textContent = p.email ? `${p.email} (${p.directory})` : `${p.name} (${p.directory})`;
+        select.appendChild(opt);
+      });
+      showBrowserSection('browser-profiles');
     }
-  });
+  } catch (err) {
+    showBrowserError('Failed to detect Chrome: ' + err.message);
+  }
+}
 
-  socket.on('connect_error', () => {
-    if (statusEl) statusEl.textContent = 'Cannot reach backend — is the server running?';
-  });
+async function handleConfirmProfile() {
+  const select = document.getElementById('profile-select');
+  const selectedProfile = select.value;
+  await createAndLaunch(selectedProfile);
+}
+
+async function createAndLaunch(selectedProfile) {
+  showBrowserSection('browser-copying');
+
+  try {
+    // Create automation profile
+    const createResult = await window.electronAPI.createAutomationProfile({
+      selectedProfile,
+      exePath: detectedExePath,
+    });
+
+    if (!createResult.ok) {
+      showBrowserError('Failed to create profile: ' + (createResult.error || 'unknown error'));
+      return;
+    }
+
+    // Launch Chrome on sign-in page
+    showBrowserSection('browser-launching');
+    const launchResult = await window.electronAPI.launchAutomationChrome(detectedExePath);
+
+    if (!launchResult.ok) {
+      showBrowserError('Failed to launch Chrome: ' + (launchResult.error || 'unknown error'));
+      return;
+    }
+
+    // Start polling for sign-in
+    showBrowserSection('browser-signin');
+    startAuthPolling();
+  } catch (err) {
+    showBrowserError('Error: ' + err.message);
+  }
+}
+
+function startAuthPolling() {
+  if (authPollTimer) clearInterval(authPollTimer);
+
+  authPollTimer = setInterval(async () => {
+    try {
+      const result = await window.electronAPI.checkBrowserAuth();
+      if (result.signedIn) {
+        clearInterval(authPollTimer);
+        authPollTimer = null;
+        browserSetupDone = true;
+        const emailEl = document.getElementById('browser-email');
+        if (emailEl) emailEl.textContent = result.email ? `(${result.email})` : '';
+        showBrowserSection('browser-success');
+        await delay(1500);
+        nextPage();
+      }
+    } catch { /* keep polling */ }
+  }, 2000);
+}
+
+function showBrowserError(msg) {
+  const errorText = document.getElementById('browser-error-text');
+  if (errorText) errorText.textContent = msg;
+  showBrowserSection('browser-error');
+}
+
+document.getElementById('btn-setup-chrome')?.addEventListener('click', handleSetupChrome);
+document.getElementById('btn-confirm-profile')?.addEventListener('click', handleConfirmProfile);
+document.getElementById('btn-retry-browser')?.addEventListener('click', () => {
+  showBrowserSection('browser-detect-btn');
+});
+
+// ---------------------------------------------------------------------------
+// Page 5: Telegram Setup
+// ---------------------------------------------------------------------------
+
+document.getElementById('btn-tg-connect')?.addEventListener('click', async () => {
+  if (!isElectron) return;
+
+  const tokenInput = document.getElementById('tg-token');
+  const hintEl = document.getElementById('tg-token-hint');
+  const token = tokenInput?.value?.trim();
+
+  if (!token || !token.includes(':')) {
+    if (hintEl) hintEl.textContent = 'Please enter a valid bot token (format: 123456:ABC...).';
+    return;
+  }
+
+  if (hintEl) hintEl.textContent = 'Verifying token...';
+
+  try {
+    const result = await window.electronAPI.saveTelegramToken(token);
+    if (result.ok) {
+      // Token valid — show step 2
+      document.getElementById('tg-step-token').classList.add('hidden');
+      document.getElementById('tg-step-chat').classList.remove('hidden');
+
+      // Poll for chat ID
+      const chatResult = await window.electronAPI.detectTelegramChatId(token);
+      if (chatResult.ok) {
+        document.getElementById('tg-chat-spinner').classList.add('hidden');
+        document.getElementById('tg-chat-hint').textContent = 'Connected! Chat ID: ' + chatResult.chatId;
+        await delay(1500);
+        nextPage();
+      } else {
+        document.getElementById('tg-chat-spinner').classList.add('hidden');
+        document.getElementById('tg-chat-hint').textContent = chatResult.error || 'Could not detect chat. You can configure this later.';
+        await delay(2000);
+        nextPage();
+      }
+    } else {
+      if (hintEl) hintEl.textContent = result.error || 'Invalid token. Check with @BotFather.';
+    }
+  } catch (err) {
+    if (hintEl) hintEl.textContent = 'Error: ' + err.message;
+  }
+});
+
+document.getElementById('btn-skip-tg')?.addEventListener('click', () => {
+  nextPage();
+});
+
+function runTelegramPage() {
+  // Page is ready — button handlers are wired above
 }
 
 // ---------------------------------------------------------------------------
-// Page 5: Complete
+// Page 6: Complete
 // ---------------------------------------------------------------------------
 
 document.getElementById('btn-close').addEventListener('click', async () => {

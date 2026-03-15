@@ -3,7 +3,7 @@
  *
  * Thin shell that:
  * 1. Copies bundled project to writable userData on first run
- * 2. Shows setup wizard (install deps → Claude auth → WhatsApp QR)
+ * 2. Shows setup wizard (install deps → Claude auth → Browser + Telegram)
  * 3. Spawns backend as child process
  * 4. Lives in system tray
  */
@@ -117,7 +117,6 @@ function ensureWorkspace() {
   // Create empty dirs that aren't bundled but the app expects
   const emptyDirs = [
     'bot/logs', 'bot/outputs', 'bot/message-queue',
-    'bot/memory/preferences', 'bot/memory/sites',
     'bot/memory/short-term',
   ];
   for (const dir of emptyDirs) {
@@ -305,6 +304,335 @@ function setupIPC() {
     }
   });
 
+  // ── Browser Setup (multi-step) ───────────────────────────────────────────
+
+  // Step 1: Detect Chrome and list profiles
+  ipcMain.handle('detect-browser', async () => {
+    try {
+      const CHROME_PATHS = [
+        path.join(process.env.PROGRAMFILES || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      ];
+
+      const exePath = CHROME_PATHS.find(p => {
+        try { return fs.existsSync(p) && fs.statSync(p).isFile(); } catch { return false; }
+      });
+
+      if (!exePath) return { found: false, profiles: [] };
+
+      // Read profiles from Local State
+      const userDataDir = path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'User Data');
+      const localStatePath = path.join(userDataDir, 'Local State');
+      let profiles = [];
+
+      if (fs.existsSync(localStatePath)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(localStatePath, 'utf-8'));
+          const infoCache = data?.profile?.info_cache;
+          if (infoCache && typeof infoCache === 'object') {
+            profiles = Object.entries(infoCache).map(([directory, info]) => ({
+              directory,
+              name: info.gaia_name || info.name || directory,
+              email: info.user_name || '',
+            })).sort((a, b) => {
+              if (a.directory === 'Default') return -1;
+              if (b.directory === 'Default') return 1;
+              return a.directory.localeCompare(b.directory, undefined, { numeric: true });
+            });
+          }
+        } catch (err) {
+          console.error('[browser-setup] Failed to read Local State:', err.message);
+        }
+      }
+
+      return { found: true, exePath, profiles };
+    } catch (err) {
+      return { found: false, error: err.message, profiles: [] };
+    }
+  });
+
+  // Step 2: Create automation profile from selected Chrome profile
+  ipcMain.handle('create-automation-profile', async (_event, { selectedProfile, exePath }) => {
+    try {
+      const userDataDir = path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'User Data');
+      const automationDir = path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'AutomationProfile');
+      const srcDir = path.join(userDataDir, selectedProfile);
+      const destDir = path.join(automationDir, 'Default');
+
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.mkdirSync(path.join(destDir, 'Network'), { recursive: true });
+
+      const PROFILE_FILES = [
+        ['Network', 'Cookies'], ['Network', 'Cookies-journal'],
+        ['Login Data'], ['Login Data For Account'], ['Web Data'],
+        ['Preferences'], ['Secure Preferences'], ['Bookmarks'], ['History'],
+      ];
+
+      let copied = 0, failed = 0;
+      for (const fileParts of PROFILE_FILES) {
+        const srcPath = path.join(srcDir, ...fileParts);
+        const destPath = path.join(destDir, ...fileParts);
+        try {
+          if (fs.existsSync(srcPath)) {
+            fs.mkdirSync(path.dirname(destPath), { recursive: true });
+            fs.copyFileSync(srcPath, destPath);
+            copied++;
+          }
+        } catch { failed++; }
+      }
+
+      // Read all profiles for the preferences file
+      const localStatePath = path.join(userDataDir, 'Local State');
+      let allProfiles = [];
+      let selectedInfo = null;
+      if (fs.existsSync(localStatePath)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(localStatePath, 'utf-8'));
+          const infoCache = data?.profile?.info_cache || {};
+          allProfiles = Object.entries(infoCache).map(([dir, info]) => ({
+            directory: dir, name: info.gaia_name || info.name || dir, email: info.user_name || '',
+          }));
+          selectedInfo = infoCache[selectedProfile];
+        } catch {}
+      }
+
+      // Write minimal Local State for AutomationProfile
+      fs.writeFileSync(path.join(automationDir, 'Local State'), JSON.stringify({
+        profile: { info_cache: { Default: selectedInfo || { name: 'Default' } }, profiles_order: ['Default'] },
+      }, null, 2));
+
+      // Generate full browser-preferences.md
+      const seededEmail = selectedInfo?.user_name || 'unknown';
+      const today = new Date().toISOString().split('T')[0];
+      const profileRows = allProfiles.map(p => {
+        const useFor = p.email ? (p.directory === 'Default' ? 'Personal' : p.name || p.directory) : p.directory;
+        return `| ${p.directory} | ${p.email || 'No account'} | ${useFor} |`;
+      }).join('\n');
+
+      const prefsContent = `# Browser Preferences
+
+## Browser Selection
+The user's preferred browser is stored here. Outdoors does not hardcode any browser. Always use whichever browser the user has configured.
+
+- **Preferred Browser**: Google Chrome
+- **Executable Path**: \`${exePath}\`
+- **CDP Port**: 9222
+- **User Data Directory**: \`${automationDir}\`
+- **Active Profile Directory**: \`Default\`
+
+
+## Chrome 136+ CDP Limitation (IMPORTANT)
+Chrome 136+ silently ignores \`--remote-debugging-port\` when using the **default user data directory**
+(\`AppData\\Local\\Google\\Chrome\\User Data\`). This is a deliberate Google security change, not a bug.
+
+**The fix**: Use a separate user data directory (\`AutomationProfile\`) dedicated to automation.
+Copy the session-critical files from the Default profile once, sign into accounts in this profile,
+and CDP works permanently from then on.
+
+**Files to copy from Default profile to AutomationProfile/Default on setup:**
+- \`Network/Cookies\` — login sessions
+- \`Login Data\`, \`Login Data For Account\` — saved passwords
+- \`Web Data\` — autofill, etc.
+- \`Preferences\`, \`Secure Preferences\` — settings
+- \`Bookmarks\`, \`History\`
+- \`../Local State\` (one level up, in User Data root) — account list
+
+**This machine's automation profile**: \`${automationDir}\`
+Seeded from **${selectedProfile}** (${seededEmail}) on ${today}. Single profile only — no other profiles in Local State.
+If sessions expire, re-copy the files above or manually sign in by launching Chrome with:
+\`\`\`
+chrome.exe --remote-debugging-port=9222 --user-data-dir="${automationDir}"
+\`\`\`
+
+## MCP Selection (Browser-Dependent)
+
+| Browser | MCP Used | Tools | How it connects |
+|---------|----------|-------|-----------------|
+| **Google Chrome** | \`chrome-devtools-mcp\` (\`--browserUrl\`) | \`mcp__chrome__*\` | Connects via \`--browserUrl http://127.0.0.1:9222\` to AutomationProfile Chrome running on CDP port 9222. |
+| **Edge / Brave / Other** | \`@playwright/mcp\` via CDP | \`mcp__playwright__*\` | Requires browser running with \`--remote-debugging-port=9222 --user-data-dir=<separate dir>\` |
+
+**Current machine**: Preferred browser = **Google Chrome** → use \`mcp__chrome__*\` tools.
+
+## Chrome Profiles (this machine)
+| Directory | Email | Use for |
+|-----------|-------|---------|
+${profileRows}
+
+**AutomationProfile** was seeded from **${selectedProfile} (${seededEmail})**.
+- The automation browser has the ${seededEmail} account's saved data.
+- Other accounts may need to be added manually in the AutomationProfile browser.
+- If sessions expire, re-copy files or sign in manually using the launch command above.
+
+## Auto-Launch (browser-health.js)
+On startup, Outdoors checks if CDP is reachable on port 9222. If not, it auto-launches Chrome with:
+- \`--remote-debugging-port=9222\`
+- \`--user-data-dir=AutomationProfile\` (the separate dir — NOT the default)
+- \`--profile-directory=Default\`
+
+## How to Use
+- Call \`mcp__chrome__navigate_page\` etc. — they connect to the AutomationProfile Chrome via CDP (port 9222)
+- The user is signed into their accounts in AutomationProfile
+- **Do NOT use \`chromium.launch()\`** — always connect via CDP to preserve sessions
+- **NEVER kill and relaunch Chrome** unless you relaunch with the correct \`--user-data-dir\`
+
+## MCP Server Configuration (.claude.json)
+
+\`\`\`json
+{
+  "mcpServers": {
+    "chrome": {
+      "command": "npx",
+      "args": ["chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9222"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222", "--no-isolated", "--timeout-navigation", "10000", "--timeout-action", "5000"]
+    }
+  }
+}
+\`\`\`
+`;
+
+      const prefsDir = path.join(BACKEND_DIR, 'bot', 'memory', 'preferences');
+      fs.mkdirSync(prefsDir, { recursive: true });
+      fs.writeFileSync(path.join(prefsDir, 'browser-preferences.md'), prefsContent, 'utf-8');
+
+      // Write .claude.json with MCP config
+      writeMcpConfig('chrome', { mcpName: 'chrome', mcpArgs: ['chrome-devtools-mcp@latest', '--browserUrl', 'http://127.0.0.1:9222'] });
+
+      return { ok: true, copied, failed, automationDir };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Step 3: Launch Chrome with AutomationProfile on sign-in page
+  ipcMain.handle('launch-automation-chrome', async (_event, exePath) => {
+    try {
+      const automationDir = path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'AutomationProfile');
+      const cdpPort = 9222;
+
+      const args = [
+        `--remote-debugging-port=${cdpPort}`,
+        `--user-data-dir=${automationDir}`,
+        `--profile-directory=Default`,
+        `--no-first-run`,
+        `--no-default-browser-check`,
+        `--disable-extensions-except=`,
+        `--disable-background-extensions`,
+        `https://accounts.google.com/`,
+      ].join("','");
+      const script = `Start-Process '${exePath}' -ArgumentList '${args}'`;
+      execFile('powershell.exe', ['-NoProfile', '-Command', script], { timeout: 5000 }, () => {});
+
+      // Wait for CDP to become reachable
+      const http = require('http');
+      await new Promise((resolve, reject) => {
+        let attempts = 0;
+        const interval = setInterval(() => {
+          attempts++;
+          const req = http.get(`http://localhost:${cdpPort}/json/version`, { timeout: 2000 }, (res) => {
+            if (res.statusCode === 200) { clearInterval(interval); resolve(); }
+            res.resume();
+          });
+          req.on('error', () => {});
+          req.on('timeout', () => req.destroy());
+          if (attempts >= 30) { clearInterval(interval); reject(new Error('CDP did not become reachable')); }
+        }, 500);
+      });
+
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Step 4: Check if user signed into AutomationProfile Chrome
+  ipcMain.handle('check-browser-auth', async () => {
+    try {
+      const automationDir = path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'AutomationProfile');
+      const prefsPath = path.join(automationDir, 'Default', 'Preferences');
+      if (!fs.existsSync(prefsPath)) return { signedIn: false, email: null };
+
+      const data = JSON.parse(fs.readFileSync(prefsPath, 'utf-8'));
+      const accounts = data?.account_info || [];
+      if (accounts.length > 0) {
+        const account = accounts.find(a => a.email) || accounts[0];
+        return { signedIn: true, email: account?.email || 'signed in' };
+      }
+      return { signedIn: false, email: null };
+    } catch {
+      return { signedIn: false, email: null };
+    }
+  });
+
+  // ── Telegram Setup ───────────────────────────────────────────────────────
+  ipcMain.handle('save-telegram-token', async (_event, token) => {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+      const data = await res.json();
+      if (!data.ok) {
+        return { ok: false, error: 'Invalid token: ' + (data.description || 'unknown error') };
+      }
+
+      // Save token to config.json
+      let cfg = {};
+      if (fs.existsSync(CONFIG_PATH)) {
+        try { cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch {}
+      }
+      cfg.telegramToken = token;
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+
+      return { ok: true, botUsername: data.result.username };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('detect-telegram-chat-id', async (_event, token) => {
+    // Clear any pending updates first
+    try {
+      await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1`);
+    } catch {}
+
+    // Poll for /start message for up to 60 seconds
+    const start = Date.now();
+    const timeout = 60000;
+
+    while (Date.now() - start < timeout) {
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?timeout=5`);
+        const data = await res.json();
+        if (data.ok && data.result.length > 0) {
+          for (const update of data.result) {
+            const msg = update.message;
+            if (msg && msg.chat) {
+              const chatId = msg.chat.id;
+              // Save chatId to config
+              let cfg = {};
+              if (fs.existsSync(CONFIG_PATH)) {
+                try { cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch {}
+              }
+              cfg.telegramAllowedIds = [chatId];
+              fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+
+              // Acknowledge the update
+              try {
+                await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${update.update_id + 1}`);
+              } catch {}
+
+              return { ok: true, chatId };
+            }
+          }
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    return { ok: false, error: 'Timed out waiting for a message. Send /start to your bot and try again.' };
+  });
+
   // Start the backend
   ipcMain.handle('start-backend', async () => {
     if (backendProcess) return { ok: true, alreadyRunning: true };
@@ -320,8 +648,8 @@ function setupIPC() {
 
   // Get backend port for Socket.IO connection
   ipcMain.handle('get-backend-url', () => {
-    // Read port from config, default 3457
-    let port = 3457;
+    // Read port from config, default 3458
+    let port = 3458;
     try {
       if (fs.existsSync(CONFIG_PATH)) {
         const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
@@ -331,10 +659,17 @@ function setupIPC() {
     return `http://localhost:${port}`;
   });
 
-  // Mark setup complete
+  // Mark setup complete and start the backend
   ipcMain.handle('complete-setup', async () => {
     fs.writeFileSync(SETUP_DONE_FLAG, new Date().toISOString());
     setupAutoLaunch();
+    // Start backend immediately after setup (don't wait for app restart)
+    if (!backendProcess) {
+      startBackend().then(result => {
+        if (result.ok) console.log('[setup] Backend started after setup complete');
+        else console.error('[setup] Backend failed to start:', result.error);
+      });
+    }
     return { ok: true };
   });
 
@@ -342,6 +677,67 @@ function setupIPC() {
   ipcMain.handle('close-window', () => {
     if (mainWindow) mainWindow.hide();
   });
+}
+
+// ── MCP Config Writer ───────────────────────────────────────────────────────
+
+function writeMcpConfig(browserKey, browser) {
+  const config = { mcpServers: {} };
+
+  // Browser MCP
+  config.mcpServers[browser.mcpName] = {
+    command: 'npx',
+    args: browser.mcpArgs,
+  };
+
+  // Context7 (library docs)
+  config.mcpServers.context7 = {
+    command: 'npx',
+    args: ['-y', '@upstash/context7-mcp@latest'],
+  };
+
+  // Google Workspace (centralized OAuth)
+  let uvxCommand = 'uvx';
+  try {
+    const findCmd = process.platform === 'win32' ? 'where uvx' : 'which uvx';
+    const found = execSync(findCmd, { encoding: 'utf-8', shell: true, timeout: 5000, windowsHide: true }).trim();
+    if (found) uvxCommand = found.split('\n')[0].trim();
+  } catch {}
+
+  // Google Workspace OAuth creds — read from oauth-creds.json (not committed to git)
+  let oauthClientId = '';
+  let oauthClientSecret = '';
+  try {
+    const credsPath = IS_DEV
+      ? path.join(__dirname, '..', 'oauth-creds.json')
+      : path.join(WORKSPACE, 'outdoorsv1', 'backend', 'oauth-creds.json');
+    if (fs.existsSync(credsPath)) {
+      const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+      oauthClientId = creds.clientId || '';
+      oauthClientSecret = creds.clientSecret || '';
+    }
+  } catch {}
+
+  if (oauthClientId && oauthClientSecret) {
+    config.mcpServers.google_workspace = {
+      type: 'stdio',
+      command: uvxCommand,
+      args: ['workspace-mcp', '--single-user'],
+      env: {
+        GOOGLE_OAUTH_CLIENT_ID: oauthClientId,
+        GOOGLE_OAUTH_CLIENT_SECRET: oauthClientSecret,
+      },
+    };
+  }
+
+  // Write .claude.json to the backend directory (Claude CLI's project root, where CLAUDE.md lives)
+  const claudeConfigDir = IS_DEV
+    ? path.join(__dirname, '..')
+    : path.join(WORKSPACE, 'outdoorsv1', 'backend');
+  const claudeConfigPath = path.join(claudeConfigDir, '.claude.json');
+
+  fs.mkdirSync(claudeConfigDir, { recursive: true });
+  fs.writeFileSync(claudeConfigPath, JSON.stringify(config, null, 2) + '\n');
 }
 
 // ── Dev Log Window ──────────────────────────────────────────────────────────

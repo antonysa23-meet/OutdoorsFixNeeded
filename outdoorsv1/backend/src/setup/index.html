@@ -79,30 +79,87 @@
       </div>
     </div>
 
-    <!-- Page 4: WhatsApp QR Code -->
+    <!-- Page 4: Browser Setup -->
     <div class="page" data-page="3">
       <div class="page-content">
-        <h2>Scan with WhatsApp</h2>
+        <h2>Set up your browser</h2>
         <p class="subtitle">
-          Open WhatsApp on your phone &rarr; Settings &rarr; Linked Devices &rarr; Link a Device
+          Outdoors uses your browser to take actions on your behalf.
+          Your logins will carry over.
         </p>
-        <div class="qr-container">
-          <div id="qr-loading" class="qr-placeholder">
-            <div class="spinner"></div>
-            <p class="qr-status-text">Starting backend &amp; waiting for QR code...</p>
+        <div id="browser-detect-btn">
+          <button class="btn-primary" id="btn-setup-chrome">Set Up Chrome</button>
+        </div>
+        <div id="browser-detecting" class="browser-status hidden">
+          <div class="spinner-small"></div>
+          <p class="browser-status-text">Detecting Chrome...</p>
+        </div>
+        <div id="browser-not-found" class="hidden">
+          <p class="error-text">Chrome not found. Please install Google Chrome first.</p>
+          <p class="auth-hint">Download from <a href="https://www.google.com/chrome/" target="_blank">google.com/chrome</a></p>
+        </div>
+        <div id="browser-profiles" class="hidden">
+          <p class="profile-label">Select which Chrome profile to use as the base:</p>
+          <select id="profile-select" class="profile-select"></select>
+          <p class="auth-hint">Outdoors will create a separate automation profile from this one.</p>
+          <button class="btn-primary" id="btn-confirm-profile">Use This Profile</button>
+        </div>
+        <div id="browser-copying" class="browser-status hidden">
+          <div class="spinner-small"></div>
+          <p class="browser-status-text">Creating automation profile...</p>
+        </div>
+        <div id="browser-launching" class="browser-status hidden">
+          <div class="spinner-small"></div>
+          <p class="browser-status-text">Launching Chrome...</p>
+        </div>
+        <div id="browser-signin" class="hidden">
+          <p class="signin-instruction">Chrome opened on the Google sign-in page.</p>
+          <p class="signin-instruction"><strong>Sign into your Google account</strong> in the Chrome window that just appeared.</p>
+          <div class="browser-status">
+            <div class="spinner-small"></div>
+            <p class="browser-status-text" id="signin-status-text">Waiting for sign-in...</p>
           </div>
-          <div id="qr-display" class="hidden">
-            <div class="qr-frame">
-              <img id="qr-image" alt="QR Code" />
-            </div>
-          </div>
-          <p class="qr-status" id="qr-status"></p>
+        </div>
+        <div id="browser-success" class="browser-status hidden">
+          <div class="complete-mark small-mark"></div>
+          <p class="browser-status-text">Browser ready <span id="browser-email"></span></p>
+        </div>
+        <div id="browser-error" class="hidden">
+          <p class="error-text" id="browser-error-text"></p>
+          <button class="btn-skip" id="btn-retry-browser">Try again</button>
         </div>
       </div>
     </div>
 
-    <!-- Page 5: Complete -->
+    <!-- Page 5: Telegram Setup -->
     <div class="page" data-page="4">
+      <div class="page-content">
+        <h2>Connect Telegram</h2>
+        <p class="subtitle">
+          Outdoors lives in your Telegram. Create a bot, paste the token, then send it a message.
+        </p>
+        <div class="telegram-steps">
+          <div class="telegram-step" id="tg-step-token">
+            <p class="step-label">1. Create a bot with <a href="https://t.me/BotFather" target="_blank">@BotFather</a> and paste the token:</p>
+            <div class="token-input-group">
+              <input type="text" class="input-field" id="tg-token" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" spellcheck="false" />
+              <button class="btn-primary btn-small" id="btn-tg-connect">Connect</button>
+            </div>
+            <p class="auth-hint" id="tg-token-hint"></p>
+          </div>
+          <div class="telegram-step hidden" id="tg-step-chat">
+            <div class="complete-mark small-mark"></div>
+            <p class="step-label">Bot connected! Now send <code>/start</code> to your bot in Telegram.</p>
+            <div class="spinner-small" id="tg-chat-spinner"></div>
+            <p class="auth-hint" id="tg-chat-hint">Waiting for your message...</p>
+          </div>
+        </div>
+        <button class="btn-skip" id="btn-skip-tg">Skip for now</button>
+      </div>
+    </div>
+
+    <!-- Page 6: Complete -->
+    <div class="page" data-page="5">
       <div class="page-content complete-page">
         <div class="complete-mark"></div>
         <h2>You're all set.</h2>
@@ -110,7 +167,7 @@
           Outdoors is now running quietly in the background.
         </p>
         <p class="complete-instruction">
-          Send a message in your Outdoors WhatsApp group to get started.
+          Send a message to your bot in Telegram to get started.
           That's it. No apps to open, no windows to manage.
         </p>
         <div class="complete-commands">
@@ -131,6 +188,7 @@
       <span class="dot" data-dot="2"></span>
       <span class="dot" data-dot="3"></span>
       <span class="dot" data-dot="4"></span>
+      <span class="dot" data-dot="5"></span>
     </div>
   </div>
 

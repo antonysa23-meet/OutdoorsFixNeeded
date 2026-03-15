@@ -481,6 +481,133 @@ h2 {
   color: var(--text-secondary);
 }
 
+/* ============================================================
+   Browser setup page
+   ============================================================ */
+
+.browser-status {
+  text-align: center;
+  margin: 24px 0;
+}
+
+.browser-status-text {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin: 12px 0 0 0;
+}
+
+.profile-label {
+  font-size: 14px;
+  color: var(--text);
+  margin: 0 0 8px 0;
+  text-align: left;
+}
+
+.profile-select {
+  width: 100%;
+  padding: 10px 14px;
+  margin: 0 0 12px 0;
+  font-family: 'Source Serif 4', Georgia, serif;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--white);
+  color: var(--text);
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239A8B78' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  transition: border-color 0.2s ease;
+}
+
+.profile-select:focus {
+  border-color: var(--accent);
+}
+
+.signin-instruction {
+  font-size: 14px;
+  color: var(--text);
+  margin: 0 0 8px 0;
+  line-height: 1.6;
+}
+
+.error-text {
+  font-size: 14px;
+  color: var(--error);
+  margin: 0 0 8px 0;
+}
+
+/* ============================================================
+   Telegram setup page
+   ============================================================ */
+
+.telegram-steps {
+  text-align: left;
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.telegram-step {
+  margin-bottom: 20px;
+}
+
+.step-label {
+  font-size: 14px;
+  color: var(--text);
+  margin: 0 0 12px 0;
+  line-height: 1.6;
+}
+
+.step-label a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.step-label code {
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  background: var(--bg-secondary);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--highlight);
+}
+
+.token-input-group {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.input-field {
+  flex: 1;
+  padding: 10px 14px;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--white);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.input-field:focus {
+  border-color: var(--accent);
+}
+
+.input-field::placeholder {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.btn-small {
+  padding: 10px 20px;
+  font-size: 14px;
+}
+
 .hidden {
   display: none !important;
 }
